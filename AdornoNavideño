@@ -1,0 +1,234 @@
+#include <Adafruit_NeoPixel.h>
+#include <DHT.h>
+
+// --- PINES Y CONFIGURACIÓN FÍSICA ---
+constexpr uint8_t PIN_SENSOR_DHT = 4;
+constexpr uint8_t PIN_TIRA_LEDS = 26;
+constexpr uint8_t PIN_ALTAVOZ = 18; 
+constexpr uint8_t TOTAL_LEDS = 12;
+
+DHT sensorClima(PIN_SENSOR_DHT, DHT22);
+Adafruit_NeoPixel tiraLeds(TOTAL_LEDS, PIN_TIRA_LEDS, NEO_RGB + NEO_KHZ800);
+
+// --- ESTADOS DE TEMPERATURA ---
+enum EstadoTemperatura { FRIO, TEMPLADO, CALIDO };
+EstadoTemperatura modoActual = FRIO;
+
+// --- CRONÓMETROS (RELOJES MILLIS) ---
+unsigned long ultimoTiempoSensor = 0;
+unsigned long ultimoTiempoAnimacion = 0;
+uint16_t velocidadAnimacionLeds = 30;
+
+float anguloRespiracionAzul = 0.0f;
+uint8_t pasoDestelloVerde = 0;
+
+// --- NOTAS MUSICALES (FRECUENCIAS EN Hz) ---
+#define NOTA_SOL4  392
+#define NOTA_LA4   440
+#define NOTA_SI4   494
+#define NOTA_DO5   523
+#define NOTA_RE5   587
+#define NOTA_MI5   659
+#define NOTA_FA5   698
+#define NOTA_SOL5  784
+#define NOTA_LA5   880
+#define NOTA_SI5   988
+#define NOTA_DO6   1047
+#define NOTA_RE6   1175
+
+const int notasFrio[] = {
+  NOTA_SOL5, NOTA_LA5, NOTA_SOL5, NOTA_MI5,
+  NOTA_SOL5, NOTA_LA5, NOTA_SOL5, NOTA_MI5,
+  NOTA_RE6, NOTA_RE6, NOTA_SI5,
+  NOTA_DO6, NOTA_DO6, NOTA_SOL5
+};
+const int duracionNotasFrio[] = {
+  450, 150, 300, 900,
+  450, 150, 300, 900,
+  600, 300, 900,
+  600, 300, 900
+};
+
+const int notasTemplado[] = {
+  NOTA_SOL4, 
+  NOTA_DO5, NOTA_DO5, NOTA_RE5, NOTA_DO5, NOTA_SI4, NOTA_LA4, NOTA_LA4,
+  NOTA_LA4, NOTA_RE5, NOTA_RE5, NOTA_MI5, NOTA_RE5, NOTA_DO5, NOTA_SI4, NOTA_SOL4,
+  NOTA_SOL4, NOTA_MI5, NOTA_MI5, NOTA_FA5, NOTA_MI5, NOTA_RE5, NOTA_DO5, NOTA_LA4,
+  NOTA_SOL4, NOTA_SOL4, NOTA_LA4, NOTA_RE5, NOTA_SI4, NOTA_DO5
+};
+const int duracionNotasTemplado[] = {
+  300,
+  300, 150, 150, 150, 150, 300, 300,
+  300, 300, 150, 150, 150, 150, 300, 300,
+  300, 300, 150, 150, 150, 150, 300, 300,
+  150, 150, 300, 300, 300, 600
+};
+
+const int notasCalido[] = {
+  NOTA_MI5, NOTA_MI5, NOTA_MI5, NOTA_MI5, NOTA_MI5, NOTA_MI5, 
+  NOTA_MI5, NOTA_SOL5, NOTA_DO5, NOTA_RE5, NOTA_MI5,
+  NOTA_FA5, NOTA_FA5, NOTA_FA5, NOTA_FA5, NOTA_FA5, NOTA_MI5, NOTA_MI5, NOTA_MI5,
+  NOTA_MI5, NOTA_RE5, NOTA_RE5, NOTA_MI5, NOTA_RE5, NOTA_SOL5
+};
+const int duracionNotasCalido[] = {
+  300, 300, 600, 300, 300, 600,
+  300, 300, 450, 150, 1200,
+  300, 300, 450, 150, 300, 300, 300, 150,
+  150, 300, 300, 300, 600, 600
+};
+
+// --- CONTROL DEL REPRODUCTOR DE MÚSICA ---
+const int* melodiaEnReproduccion = nullptr;
+const int* duracionesEnReproduccion = nullptr;
+uint8_t totalNotasActuales = 0;
+uint8_t indiceNotaActual = 0;
+unsigned long momentoInicioNota = 0;
+int duracionNotaActual = 0;
+bool notaSonando = false;
+
+void asignarNuevaMelodia(const int* melodia, const int* duraciones, uint8_t cantidadNotas);
+void actualizarReproductorMusica();
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("--- Sistema iniciado con éxito ---");
+
+  pinMode(PIN_ALTAVOZ, OUTPUT);
+  sensorClima.begin();
+  tiraLeds.begin();
+  tiraLeds.show();
+  
+  asignarNuevaMelodia(notasFrio, duracionNotasFrio, sizeof(notasFrio) / sizeof(notasFrio[0])); 
+}
+
+void loop() {
+  unsigned long tiempoActual = millis();
+
+  // 1. BUZZER (evaluación continua)
+  actualizarReproductorMusica();
+
+  // 2. SENSOR DE TEMPERATURA (cada 2000 ms)
+  if (tiempoActual - ultimoTiempoSensor >= 2000) {
+    ultimoTiempoSensor = tiempoActual;
+    float temperaturaLeida = sensorClima.readTemperature();
+    
+    if (isnan(temperaturaLeida)) {
+      Serial.println("[ERROR] No se pudo leer el sensor DHT22");
+    } else {
+      Serial.print("Temperatura: ");
+      Serial.print(temperaturaLeida, 1);
+      Serial.print(" °C | Estado: ");
+
+      if (temperaturaLeida < 20.0f) {
+        Serial.println("FRÍO (Animación azul / Melodía frío)");
+        modoActual = FRIO;
+        velocidadAnimacionLeds = 25;
+        asignarNuevaMelodia(notasFrio, duracionNotasFrio, sizeof(notasFrio) / sizeof(notasFrio[0]));
+      } else if (temperaturaLeida <= 24.0f) {
+        Serial.println("TEMPLADO (Animación verde / Melodía templado)");
+        modoActual = TEMPLADO;
+        velocidadAnimacionLeds = 80;
+        asignarNuevaMelodia(notasTemplado, duracionNotasTemplado, sizeof(notasTemplado) / sizeof(notasTemplado[0]));
+      } else {
+        Serial.println("CÁLIDO (Animación fuego / Melodía cálido)");
+        modoActual = CALIDO;
+        velocidadAnimacionLeds = 65;
+        asignarNuevaMelodia(notasCalido, duracionNotasCalido, sizeof(notasCalido) / sizeof(notasCalido[0]));
+      }
+    }
+  }
+
+  // 3. LUCES NEOPIXEL
+  if (tiempoActual - ultimoTiempoAnimacion >= velocidadAnimacionLeds) {
+    ultimoTiempoAnimacion = tiempoActual;
+
+    if (modoActual == FRIO) {
+      anguloRespiracionAzul += 0.035f;
+      if (anguloRespiracionAzul >= 6.28318f) anguloRespiracionAzul = 0.0f;
+      
+      float intensidadBrillo = 0.15f + 0.85f * (0.5f + 0.5f * sin(anguloRespiracionAzul));
+      
+      for (uint8_t i = 0; i < TOTAL_LEDS; i++) {
+        if (i % 2 == 0) {
+          tiraLeds.setPixelColor(i, tiraLeds.Color(0, (uint8_t)(80 * intensidadBrillo), (uint8_t)(255 * intensidadBrillo)));
+        } else {
+          tiraLeds.setPixelColor(i, tiraLeds.Color(0, 0, (uint8_t)(200 * intensidadBrillo)));
+        }
+      }
+    } 
+    else if (modoActual == TEMPLADO) {
+      pasoDestelloVerde = (pasoDestelloVerde + 1) % 5;
+      
+      if (pasoDestelloVerde == 0) {
+        for (uint8_t i = 0; i < TOTAL_LEDS; i++) tiraLeds.setPixelColor(i, tiraLeds.Color(0, 255, 0));
+      } else if (pasoDestelloVerde == 1) {
+        for (uint8_t i = 0; i < TOTAL_LEDS; i++) tiraLeds.setPixelColor(i, tiraLeds.Color(20, 100, 0));
+      } else {
+        tiraLeds.clear();
+      }
+    } 
+    else {
+      for (uint8_t i = 0; i < TOTAL_LEDS; i++) {
+        uint8_t brilloAleatorio = random(40, 160);
+        uint8_t tonoColor = random(0, 3);
+        
+        if (tonoColor == 0) {
+          tiraLeds.setPixelColor(i, tiraLeds.Color(brilloAleatorio, 0, 0));
+        } else if (tonoColor == 1) {
+          tiraLeds.setPixelColor(i, tiraLeds.Color(brilloAleatorio, brilloAleatorio / 4, 0));
+        } else {
+          tiraLeds.setPixelColor(i, tiraLeds.Color(brilloAleatorio, 0, brilloAleatorio / 3));
+        }
+      }
+    }
+    
+    tiraLeds.show();
+  }
+}
+
+void asignarNuevaMelodia(const int* melodia, const int* duraciones, uint8_t cantidadNotas) {
+  if (melodiaEnReproduccion == melodia) return; 
+  
+  melodiaEnReproduccion = melodia;
+  duracionesEnReproduccion = duraciones;
+  totalNotasActuales = cantidadNotas;
+  indiceNotaActual = 0;
+  
+  momentoInicioNota = millis();
+  duracionNotaActual = duracionesEnReproduccion[0];
+  
+  if (melodiaEnReproduccion[0] != 0) {
+    tone(PIN_ALTAVOZ, melodiaEnReproduccion[0]); 
+    notaSonando = true;
+  } else {
+    notaSonando = false;
+  }
+}
+
+void actualizarReproductorMusica() {
+  unsigned long tiempoActual = millis();
+  
+  if (notaSonando && (tiempoActual - momentoInicioNota >= (duracionNotaActual * 0.85))) {
+    noTone(PIN_ALTAVOZ);
+    notaSonando = false;
+  }
+  
+  if (tiempoActual - momentoInicioNota >= duracionNotaActual) {
+    indiceNotaActual++; 
+    
+    if (indiceNotaActual >= totalNotasActuales) {
+      indiceNotaActual = 0; 
+    } 
+    
+    momentoInicioNota = tiempoActual;
+    duracionNotaActual = duracionesEnReproduccion[indiceNotaActual];
+    
+    if (melodiaEnReproduccion[indiceNotaActual] != 0) {
+      tone(PIN_ALTAVOZ, melodiaEnReproduccion[indiceNotaActual]); 
+      notaSonando = true;
+    } else {
+      noTone(PIN_ALTAVOZ);
+      notaSonando = false;
+    }
+  }
+}
